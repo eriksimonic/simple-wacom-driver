@@ -1,3 +1,5 @@
+mod tray;
+
 use rusb::{Direction, TransferType};
 use std::time::Duration;
 
@@ -5,6 +7,7 @@ const WACOM_VID: u16 = 0x056A;
 const CTL6100WL_PID: u16 = 0x0378;
 
 use windows::Win32::Foundation::POINT;
+use windows::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
 use windows::Win32::UI::Controls::{
     CreateSyntheticPointerDevice, HSYNTHETICPOINTERDEVICE, POINTER_FEEDBACK_NONE,
     POINTER_TYPE_INFO, POINTER_TYPE_INFO_0,
@@ -416,6 +419,13 @@ fn main() {
     let buttons_only = mode.as_deref() == Some("buttons");
     let mouse_mode = mode.as_deref() == Some("mouse");
     let buttons = load_buttons();
+    // started from a logon task or a double-click, the console exists only for us, so remove its window
+    if mode.is_none() && unsafe { GetConsoleProcessList(&mut [0u32; 2]) } == 1 {
+        let _ = unsafe { FreeConsole() };
+    }
+    if !print_only && !buttons_only {
+        tray::spawn(if mouse_mode { "mouse" } else { "pen" }, config_path());
+    }
     let pen_buttons = || [(PEN_BARREL_BIT, buttons.pen_lower.clone()), (PEN_ERASER_BIT, buttons.pen_upper.clone())];
     let mut mouse = mouse_mode.then(|| MouseInjector::new(pen_buttons()));
     let mut injector = (!print_only && !mouse_mode)
@@ -424,6 +434,7 @@ fn main() {
 
     let mut waiting = false;
     loop {
+        tray::STATE.store(tray::WAITING, std::sync::atomic::Ordering::Relaxed);
         let Some((handle, endpoint, size)) = open_tablet() else {
             if !waiting {
                 println!("waiting for the tablet (is it plugged in and bound to WinUSB?)");
@@ -433,6 +444,7 @@ fn main() {
             continue;
         };
         waiting = false;
+        tray::STATE.store(tray::CONNECTED, std::sync::atomic::Ordering::Relaxed);
         println!("tablet connected, reading endpoint {endpoint:02x} (ctrl+c to stop)");
 
         let mut last_seen: std::collections::HashMap<u8, Vec<u8>> = Default::default();
