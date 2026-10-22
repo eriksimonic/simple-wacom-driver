@@ -1,0 +1,6 @@
+This installer bundles Zadig 2.9 by Pete Batard, unmodified, from
+https://github.com/pbatard/libwdi/releases/download/v1.5.1/zadig-2.9.exe
+
+Zadig is free software under the GNU GPL version 3 or later. Its source code is at
+https://github.com/pbatard/libwdi (tag v1.5.1) and https://zadig.akeo.ie
+Simple Wacom driver is under the same license, see LICENSE.

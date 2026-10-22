@@ -1,4 +1,4 @@
-# Starts wacom.exe hidden at every logon and starts it now. Run from the folder that holds wacom.exe.
+# Starts wacom.exe at every logon and starts it now. Run from the folder that holds wacom.exe.
 $exe = Join-Path $PSScriptRoot 'wacom.exe'
 if (-not (Test-Path $exe)) { throw "wacom.exe not found next to this script" }
 
@@ -9,4 +9,4 @@ $settings = New-ScheduledTaskSettingsSet -Hidden -ExecutionTimeLimit ([TimeSpan]
 
 Register-ScheduledTask -TaskName 'SimpleWacomDriver' -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
 Start-ScheduledTask -TaskName 'SimpleWacomDriver'
-Write-Host 'Installed. wacom.exe now starts hidden at logon.'
+Write-Host 'Installed. wacom.exe now starts at logon with a tray icon and no console window.'
