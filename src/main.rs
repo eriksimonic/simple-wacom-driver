@@ -16,7 +16,7 @@ use windows::Win32::UI::Input::Pointer::{
 };
 use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
     VIRTUAL_KEY, VK_CONTROL, VK_MENU, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -136,12 +136,85 @@ const MAX_X: i32 = 21600;
 const MAX_Y: i32 = 13500;
 const WINDOWS_MAX_PRESSURE: u32 = 1024;
 
-/// Sends the pen to Windows as a synthetic pen, with the tablet area stretched over the primary screen.
+/// Maps tablet coordinates onto the primary screen, using the part of the tablet that has the screen's aspect ratio.
+struct Mapper {
+    screen: (i32, i32),
+    /// x offset, y offset, width, height in tablet units
+    area: (i32, i32, i32, i32),
+}
+
+impl Mapper {
+    fn new() -> Self {
+        // without this, GetSystemMetrics returns the screen size divided by the display scale
+        let _ = unsafe { SetProcessDPIAware() };
+        let screen = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+        let (width, height) = if MAX_X * screen.1 <= MAX_Y * screen.0 {
+            (MAX_X, MAX_X * screen.1 / screen.0)
+        } else {
+            (MAX_Y * screen.0 / screen.1, MAX_Y)
+        };
+        Mapper { screen, area: ((MAX_X - width) / 2, (MAX_Y - height) / 2, width, height) }
+    }
+
+    fn map(&self, x: i32, y: i32) -> (i32, i32) {
+        (
+            ((x - self.area.0) * self.screen.0 / self.area.2).clamp(0, self.screen.0 - 1),
+            ((y - self.area.1) * self.screen.1 / self.area.3).clamp(0, self.screen.1 - 1),
+        )
+    }
+}
+
+/// Standard mouse mode: moves the normal cursor, tip is left click, barrel button is right click. No pressure.
+struct MouseInjector {
+    mapper: Mapper,
+    tip: bool,
+    barrel: bool,
+    last_report: [u8; 10],
+    pen_buttons: [(u8, Action); 2],
+}
+
+impl MouseInjector {
+    fn new(pen_buttons: [(u8, Action); 2]) -> Self {
+        MouseInjector { mapper: Mapper::new(), tip: false, barrel: false, last_report: [0; 10], pen_buttons }
+    }
+
+    fn send(&mut self, r: &[u8]) {
+        if r[..10] == self.last_report {
+            return;
+        }
+        self.last_report.copy_from_slice(&r[..10]);
+        let in_range = r[1] & 0x20 != 0;
+        let tip = in_range && r[1] & 0x01 != 0;
+        let barrel = self.pen_buttons.iter().any(|(bit, action)| r[1] & bit != 0 && *action == Action::Barrel);
+        if !in_range && !self.tip && !self.barrel {
+            return;
+        }
+
+        let x = u16::from_le_bytes([r[2], r[3]]) as i32;
+        let y = u16::from_le_bytes([r[5], r[6]]) as i32;
+        let (px, py) = self.mapper.map(x, y);
+        let (width, height) = self.mapper.screen;
+        let mouse = |dx: i32, dy: i32, flags| INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 { mi: MOUSEINPUT { dx, dy, dwFlags: flags, ..Default::default() } },
+        };
+        let mut inputs = vec![mouse(px * 65535 / (width - 1), py * 65535 / (height - 1), MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE)];
+        if tip != self.tip {
+            inputs.push(mouse(0, 0, if tip { MOUSEEVENTF_LEFTDOWN } else { MOUSEEVENTF_LEFTUP }));
+        }
+        if barrel != self.barrel {
+            inputs.push(mouse(0, 0, if barrel { MOUSEEVENTF_RIGHTDOWN } else { MOUSEEVENTF_RIGHTUP }));
+        }
+        self.tip = tip;
+        self.barrel = barrel;
+        unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    }
+}
+
+/// Sends the pen to Windows as a synthetic pen, with pressure.
 struct Injector {
     device: HSYNTHETICPOINTERDEVICE,
-    screen: (i32, i32),
-    /// Part of the tablet (x offset, y offset, width, height) that has the screen's aspect ratio.
-    area: (i32, i32, i32, i32),
+    mapper: Mapper,
     last_flags: POINTER_FLAGS,
     last_report: [u8; 10],
     pen_buttons: [(u8, Action); 2],
@@ -151,16 +224,7 @@ impl Injector {
     fn new(pen_buttons: [(u8, Action); 2]) -> Self {
         let device = unsafe { CreateSyntheticPointerDevice(PT_PEN, 1, POINTER_FEEDBACK_NONE) }
             .expect("CreateSyntheticPointerDevice");
-        // without this, GetSystemMetrics returns the screen size divided by the display scale
-        let _ = unsafe { SetProcessDPIAware() };
-        let screen = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
-        let (width, height) = if MAX_X * screen.1 <= MAX_Y * screen.0 {
-            (MAX_X, MAX_X * screen.1 / screen.0)
-        } else {
-            (MAX_Y * screen.0 / screen.1, MAX_Y)
-        };
-        let area = ((MAX_X - width) / 2, (MAX_Y - height) / 2, width, height);
-        Injector { device, screen, area, last_flags: POINTER_FLAGS(0), last_report: [0; 10], pen_buttons }
+        Injector { device, mapper: Mapper::new(), last_flags: POINTER_FLAGS(0), last_report: [0; 10], pen_buttons }
     }
 
     fn send(&mut self, r: &[u8]) {
@@ -204,6 +268,7 @@ impl Injector {
             pen_flags |= PEN_FLAG_INVERTED | PEN_FLAG_ERASER;
         }
 
+        let (px, py) = self.mapper.map(x, y);
         let info = POINTER_TYPE_INFO {
             r#type: PT_PEN,
             Anonymous: POINTER_TYPE_INFO_0 {
@@ -212,10 +277,7 @@ impl Injector {
                         pointerType: PT_PEN,
                         pointerId: 0,
                         pointerFlags: pointer_flags,
-                        ptPixelLocation: POINT {
-                            x: ((x - self.area.0) * self.screen.0 / self.area.2).clamp(0, self.screen.0 - 1),
-                            y: ((y - self.area.1) * self.screen.1 / self.area.3).clamp(0, self.screen.1 - 1),
-                        },
+                        ptPixelLocation: POINT { x: px, y: py },
                         ..Default::default()
                     },
                     penFlags: pen_flags,
@@ -279,8 +341,11 @@ fn main() {
     let buttons_only = mode.as_deref() == Some("buttons");
     let mut last_seen: std::collections::HashMap<u8, Vec<u8>> = Default::default();
     let buttons = load_buttons();
-    let mut injector = (!print_only)
-        .then(|| Injector::new([(PEN_BARREL_BIT, buttons.pen_lower.clone()), (PEN_ERASER_BIT, buttons.pen_upper.clone())]));
+    let mouse_mode = mode.as_deref() == Some("mouse");
+    let pen_buttons = || [(PEN_BARREL_BIT, buttons.pen_lower.clone()), (PEN_ERASER_BIT, buttons.pen_upper.clone())];
+    let mut mouse = mouse_mode.then(|| MouseInjector::new(pen_buttons()));
+    let mut injector = (!print_only && !mouse_mode)
+        .then(|| Injector::new(pen_buttons()));
     unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) }.ok();
     let mut tablet_buttons = 0u8;
     let mut pen_buttons = 0u8;
@@ -313,9 +378,10 @@ fn main() {
                 if pressed & PEN_ERASER_BIT != 0 {
                     run_action(&buttons.pen_upper);
                 }
-                match injector.as_mut() {
-                    Some(i) => i.send(&buf[..n]),
-                    None => print_pen(&buf[..n]),
+                match (injector.as_mut(), mouse.as_mut()) {
+                    (Some(i), _) => i.send(&buf[..n]),
+                    (_, Some(m)) => m.send(&buf[..n]),
+                    _ => print_pen(&buf[..n]),
                 }
             }
             Ok(_) => {}
