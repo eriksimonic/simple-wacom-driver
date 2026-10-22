@@ -90,6 +90,15 @@ fn parse_action(value: &str) -> Option<Action> {
     }
 }
 
+/// The config next to the exe if there is one, so the tool works when started from any folder.
+fn config_path() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(CONFIG_FILE)))
+        .filter(|path| path.exists())
+        .unwrap_or_else(|| CONFIG_FILE.into())
+}
+
 fn load_buttons() -> Buttons {
     let keys = |s: &str| parse_action(s).unwrap();
     let mut buttons = Buttons {
@@ -99,7 +108,7 @@ fn load_buttons() -> Buttons {
         pressure_gamma: 1.2,
         app_gamma: Vec::new(),
     };
-    let Ok(text) = std::fs::read_to_string(CONFIG_FILE) else {
+    let Ok(text) = std::fs::read_to_string(config_path()) else {
         println!("no {CONFIG_FILE}, using default buttons");
         return buttons;
     };
@@ -383,88 +392,101 @@ fn print_pen(r: &[u8]) {
     println!("range={} tip={} x={x:5} y={y:5} pressure={pressure:4} {bar}", in_range as u8, tip as u8);
 }
 
+/// Opens the tablet and returns the handle with its interrupt IN endpoint and packet size.
+fn open_tablet() -> Option<(rusb::DeviceHandle<rusb::GlobalContext>, u8, u16)> {
+    let handle = rusb::open_device_with_vid_pid(WACOM_VID, CTL6100WL_PID)?;
+    let config = handle.device().active_config_descriptor().ok()?;
+    let (interface, endpoint, size) = config
+        .interfaces()
+        .flat_map(|iface| iface.descriptors().collect::<Vec<_>>())
+        .flat_map(|desc| {
+            desc.endpoint_descriptors()
+                .map(move |ep| (desc.interface_number(), ep))
+                .collect::<Vec<_>>()
+        })
+        .find(|(_, ep)| ep.direction() == Direction::In && ep.transfer_type() == TransferType::Interrupt)
+        .map(|(interface, ep)| (interface, ep.address(), ep.max_packet_size()))?;
+    handle.claim_interface(interface).ok()?;
+    Some((handle, endpoint, size))
+}
+
 fn main() {
-    let handle = rusb::open_device_with_vid_pid(WACOM_VID, CTL6100WL_PID)
-        .expect("tablet not found or not bound to WinUSB");
-    let config = handle.device().active_config_descriptor().expect("config descriptor");
-
-    let mut target = None;
-    for iface in config.interfaces() {
-        for desc in iface.descriptors() {
-            for ep in desc.endpoint_descriptors() {
-                println!(
-                    "interface {} endpoint {:02x} {:?} {:?} max_packet={}",
-                    desc.interface_number(),
-                    ep.address(),
-                    ep.direction(),
-                    ep.transfer_type(),
-                    ep.max_packet_size()
-                );
-                if ep.direction() == Direction::In
-                    && ep.transfer_type() == TransferType::Interrupt
-                    && target.is_none()
-                {
-                    target = Some((desc.interface_number(), ep.address(), ep.max_packet_size()));
-                }
-            }
-        }
-    }
-
-    let (interface, endpoint, size) = target.expect("no interrupt IN endpoint");
-    handle.claim_interface(interface).expect("claim interface");
-    println!("reading endpoint {endpoint:02x}, move the pen (ctrl+c to stop)");
-
     let mode = std::env::args().nth(1);
     let print_only = mode.as_deref() == Some("print");
     let buttons_only = mode.as_deref() == Some("buttons");
-    let mut last_seen: std::collections::HashMap<u8, Vec<u8>> = Default::default();
-    let buttons = load_buttons();
     let mouse_mode = mode.as_deref() == Some("mouse");
+    let buttons = load_buttons();
     let pen_buttons = || [(PEN_BARREL_BIT, buttons.pen_lower.clone()), (PEN_ERASER_BIT, buttons.pen_upper.clone())];
     let mut mouse = mouse_mode.then(|| MouseInjector::new(pen_buttons()));
     let mut injector = (!print_only && !mouse_mode)
         .then(|| Injector::new(pen_buttons(), buttons.pressure_gamma, buttons.app_gamma.clone()));
     unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) }.ok();
-    let mut tablet_buttons = 0u8;
-    let mut pen_buttons = 0u8;
-    let mut buf = vec![0u8; size as usize];
+
+    let mut waiting = false;
     loop {
-        match handle.read_interrupt(endpoint, &mut buf, Duration::from_millis(500)) {
-            Ok(n) if buttons_only => {
-                // pen reports differ constantly in position, so compare only the flags byte
-                let key = if buf[0] == PEN_REPORT { vec![buf[1]] } else { buf[..n].to_vec() };
-                if last_seen.get(&buf[0]) != Some(&key) {
-                    println!("{}", hex(&buf[..n]));
-                    last_seen.insert(buf[0], key);
-                }
+        let Some((handle, endpoint, size)) = open_tablet() else {
+            if !waiting {
+                println!("waiting for the tablet (is it plugged in and bound to WinUSB?)");
+                waiting = true;
             }
-            Ok(n) if n >= 2 && buf[0] == TABLET_REPORT && !print_only => {
-                let pressed = buf[1] & !tablet_buttons;
-                tablet_buttons = buf[1];
-                for (i, action) in buttons.tablet.iter().enumerate() {
-                    if pressed & (1 << i) != 0 {
-                        run_action(action);
+            std::thread::sleep(Duration::from_secs(1));
+            continue;
+        };
+        waiting = false;
+        println!("tablet connected, reading endpoint {endpoint:02x} (ctrl+c to stop)");
+
+        let mut last_seen: std::collections::HashMap<u8, Vec<u8>> = Default::default();
+        let mut tablet_buttons = 0u8;
+        let mut pen_buttons = 0u8;
+        let mut buf = vec![0u8; size as usize];
+        loop {
+            match handle.read_interrupt(endpoint, &mut buf, Duration::from_millis(500)) {
+                Ok(n) if buttons_only => {
+                    // pen reports differ constantly in position, so compare only the flags byte
+                    let key = if buf[0] == PEN_REPORT { vec![buf[1]] } else { buf[..n].to_vec() };
+                    if last_seen.get(&buf[0]) != Some(&key) {
+                        println!("{}", hex(&buf[..n]));
+                        last_seen.insert(buf[0], key);
                     }
                 }
+                Ok(n) if n >= 2 && buf[0] == TABLET_REPORT && !print_only => {
+                    let pressed = buf[1] & !tablet_buttons;
+                    tablet_buttons = buf[1];
+                    for (i, action) in buttons.tablet.iter().enumerate() {
+                        if pressed & (1 << i) != 0 {
+                            run_action(action);
+                        }
+                    }
+                }
+                Ok(n) if n >= 10 && buf[0] == PEN_REPORT => {
+                    let pressed = buf[1] & !pen_buttons;
+                    pen_buttons = buf[1];
+                    if pressed & PEN_BARREL_BIT != 0 {
+                        run_action(&buttons.pen_lower);
+                    }
+                    if pressed & PEN_ERASER_BIT != 0 {
+                        run_action(&buttons.pen_upper);
+                    }
+                    match (injector.as_mut(), mouse.as_mut()) {
+                        (Some(i), _) => i.send(&buf[..n]),
+                        (_, Some(m)) => m.send(&buf[..n]),
+                        _ => print_pen(&buf[..n]),
+                    }
+                }
+                Ok(_) => {}
+                Err(rusb::Error::Timeout) => {}
+                Err(e) => {
+                    println!("tablet disconnected: {e}");
+                    // lift the pen so no stroke or click stays stuck
+                    let away = [PEN_REPORT, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+                    match (injector.as_mut(), mouse.as_mut()) {
+                        (Some(i), _) => i.send(&away),
+                        (_, Some(m)) => m.send(&away),
+                        _ => {}
+                    }
+                    break;
+                }
             }
-            Ok(n) if n >= 10 && buf[0] == PEN_REPORT => {
-                let pressed = buf[1] & !pen_buttons;
-                pen_buttons = buf[1];
-                if pressed & PEN_BARREL_BIT != 0 {
-                    run_action(&buttons.pen_lower);
-                }
-                if pressed & PEN_ERASER_BIT != 0 {
-                    run_action(&buttons.pen_upper);
-                }
-                match (injector.as_mut(), mouse.as_mut()) {
-                    (Some(i), _) => i.send(&buf[..n]),
-                    (_, Some(m)) => m.send(&buf[..n]),
-                    _ => print_pen(&buf[..n]),
-                }
-            }
-            Ok(_) => {}
-            Err(rusb::Error::Timeout) => {}
-            Err(e) => panic!("read: {e}"),
         }
     }
 }

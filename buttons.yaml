@@ -15,5 +15,5 @@ pressure_gamma: 1.2
 
 # Per-app gamma, overrides pressure_gamma while that program is in the foreground.
 # Name is pressure_gamma.<exe name>. The tool prints the exe name each time the foreground app changes.
-# pressure_gamma.photoshop.exe: 0.8
-# pressure_gamma.lightroom.exe: 1.2
+pressure_gamma.photoshop.exe: 1.0
+pressure_gamma.lightroom.exe: 1.2
