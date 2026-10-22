@@ -16,7 +16,7 @@ use windows::Win32::UI::Input::Pointer::{
 };
 use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE, MOUSEINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
     VIRTUAL_KEY, VK_CONTROL, VK_MENU, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -204,25 +204,6 @@ impl Injector {
             pen_flags |= PEN_FLAG_INVERTED | PEN_FLAG_ERASER;
         }
 
-        let px = ((x - self.area.0) * self.screen.0 / self.area.2).clamp(0, self.screen.0 - 1);
-        let py = ((y - self.area.1) * self.screen.1 / self.area.3).clamp(0, self.screen.1 - 1);
-
-        // Windows shows a dot instead of the arrow after pen input, so move the real cursor while hovering
-        if in_range && !tip {
-            let mouse = INPUT {
-                r#type: INPUT_MOUSE,
-                Anonymous: INPUT_0 {
-                    mi: MOUSEINPUT {
-                        dx: px * 65535 / (self.screen.0 - 1),
-                        dy: py * 65535 / (self.screen.1 - 1),
-                        dwFlags: MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE,
-                        ..Default::default()
-                    },
-                },
-            };
-            unsafe { SendInput(&[mouse], std::mem::size_of::<INPUT>() as i32) };
-        }
-
         let info = POINTER_TYPE_INFO {
             r#type: PT_PEN,
             Anonymous: POINTER_TYPE_INFO_0 {
@@ -232,8 +213,8 @@ impl Injector {
                         pointerId: 0,
                         pointerFlags: pointer_flags,
                         ptPixelLocation: POINT {
-                            x: px,
-                            y: py,
+                            x: ((x - self.area.0) * self.screen.0 / self.area.2).clamp(0, self.screen.0 - 1),
+                            y: ((y - self.area.1) * self.screen.1 / self.area.3).clamp(0, self.screen.1 - 1),
                         },
                         ..Default::default()
                     },
