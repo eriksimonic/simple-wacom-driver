@@ -44,7 +44,7 @@ struct Buttons {
     tablet: [Action; 4],
     pen_lower: Action,
     pen_upper: Action,
-    /// Pressure curve exponent: below 1 boosts light pressure, 1 is linear.
+    /// Pressure curve exponent: below 1 boosts light pressure, above 1 softens it, 1 is linear.
     pressure_gamma: f32,
 }
 
@@ -89,7 +89,7 @@ fn load_buttons() -> Buttons {
         tablet: [keys("b"), keys("e"), keys("ctrl+alt+z"), keys("ctrl+shift+z")],
         pen_lower: Action::Barrel,
         pen_upper: Action::Eraser,
-        pressure_gamma: 0.6,
+        pressure_gamma: 1.2,
     };
     let Ok(text) = std::fs::read_to_string(CONFIG_FILE) else {
         println!("no {CONFIG_FILE}, using default buttons");
