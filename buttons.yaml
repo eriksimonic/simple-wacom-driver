@@ -1,0 +1,11 @@
+# Button actions, one per line as "button: action". Read from the current folder at startup.
+# Buttons: tablet1..tablet4 (top to bottom), pen_lower, pen_upper
+# Actions: none, barrel (pen right-click), eraser (pen eraser), or a shortcut joined with +
+# Keys: a-z, 0-9, f1-f12, ctrl, shift, alt, win, space, tab, enter, esc, backspace, delete, "[", "]", plus, minus
+
+tablet1: b
+tablet2: e
+tablet3: ctrl+alt+z
+tablet4: ctrl+shift+z
+pen_lower: barrel
+pen_upper: eraser

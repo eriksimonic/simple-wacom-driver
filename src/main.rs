@@ -28,13 +28,95 @@ const TABLET_REPORT: u8 = 0x11;
 const PEN_BARREL_BIT: u8 = 0x02;
 const PEN_ERASER_BIT: u8 = 0x04;
 
-/// Shortcut for each of the 4 tablet buttons, top to bottom. Keys are pressed in order and released in reverse.
-const TABLET_KEYS: [&[VIRTUAL_KEY]; 4] = [
-    &[VIRTUAL_KEY(b'B' as u16)],
-    &[VIRTUAL_KEY(b'E' as u16)],
-    &[VK_CONTROL, VK_MENU, VIRTUAL_KEY(b'Z' as u16)],
-    &[VK_CONTROL, VK_SHIFT, VIRTUAL_KEY(b'Z' as u16)],
-];
+const CONFIG_FILE: &str = "buttons.yaml";
+
+#[derive(Clone, PartialEq)]
+enum Action {
+    None,
+    Barrel,
+    Eraser,
+    /// Keys are pressed in order and released in reverse.
+    Keys(Vec<VIRTUAL_KEY>),
+}
+
+struct Buttons {
+    /// Top to bottom.
+    tablet: [Action; 4],
+    pen_lower: Action,
+    pen_upper: Action,
+}
+
+fn parse_key(name: &str) -> Option<VIRTUAL_KEY> {
+    let name = name.trim().to_ascii_lowercase();
+    let vk = match name.as_str() {
+        "ctrl" => VK_CONTROL.0,
+        "shift" => VK_SHIFT.0,
+        "alt" => VK_MENU.0,
+        "win" => 0x5B,
+        "space" => 0x20,
+        "tab" => 0x09,
+        "enter" => 0x0D,
+        "esc" => 0x1B,
+        "backspace" => 0x08,
+        "delete" => 0x2E,
+        "[" => 0xDB,
+        "]" => 0xDD,
+        "plus" => 0xBB,
+        "minus" => 0xBD,
+        f if f.starts_with('f') && f[1..].parse::<u16>().is_ok_and(|n| (1..=12).contains(&n)) => {
+            0x70 + f[1..].parse::<u16>().unwrap() - 1
+        }
+        c if c.len() == 1 && c.as_bytes()[0].is_ascii_alphanumeric() => c.to_ascii_uppercase().as_bytes()[0] as u16,
+        _ => return None,
+    };
+    Some(VIRTUAL_KEY(vk))
+}
+
+fn parse_action(value: &str) -> Option<Action> {
+    match value.trim().trim_matches(|c| c == '"' || c == ''').to_ascii_lowercase().as_str() {
+        "none" => Some(Action::None),
+        "barrel" => Some(Action::Barrel),
+        "eraser" => Some(Action::Eraser),
+        keys => keys.split('+').map(parse_key).collect::<Option<Vec<_>>>().map(Action::Keys),
+    }
+}
+
+fn load_buttons() -> Buttons {
+    let keys = |s: &str| parse_action(s).unwrap();
+    let mut buttons = Buttons {
+        tablet: [keys("b"), keys("e"), keys("ctrl+alt+z"), keys("ctrl+shift+z")],
+        pen_lower: Action::Barrel,
+        pen_upper: Action::Eraser,
+    };
+    let Ok(text) = std::fs::read_to_string(CONFIG_FILE) else {
+        println!("no {CONFIG_FILE}, using default buttons");
+        return buttons;
+    };
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (name, value) = line.split_once(':').unwrap_or_else(|| panic!("{CONFIG_FILE} line {}: expected name: value", i + 1));
+        let action = parse_action(value).unwrap_or_else(|| panic!("{CONFIG_FILE} line {}: bad action '{}'", i + 1, value.trim()));
+        match name.trim() {
+            "tablet1" => buttons.tablet[0] = action,
+            "tablet2" => buttons.tablet[1] = action,
+            "tablet3" => buttons.tablet[2] = action,
+            "tablet4" => buttons.tablet[3] = action,
+            "pen_lower" => buttons.pen_lower = action,
+            "pen_upper" => buttons.pen_upper = action,
+            other => panic!("{CONFIG_FILE} line {}: unknown button '{other}'", i + 1),
+        }
+    }
+    buttons
+}
+
+fn run_action(action: &Action) {
+    if let Action::Keys(keys) = action {
+        press_keys(keys);
+    }
+}
 
 fn press_keys(keys: &[VIRTUAL_KEY]) {
     let key = |vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS| INPUT {
@@ -60,14 +142,15 @@ struct Injector {
     screen: (i32, i32),
     last_flags: POINTER_FLAGS,
     last_report: [u8; 10],
+    pen_buttons: [(u8, Action); 2],
 }
 
 impl Injector {
-    fn new() -> Self {
+    fn new(pen_buttons: [(u8, Action); 2]) -> Self {
         let device = unsafe { CreateSyntheticPointerDevice(PT_PEN, 1, POINTER_FEEDBACK_DEFAULT) }
             .expect("CreateSyntheticPointerDevice");
         let screen = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
-        Injector { device, screen, last_flags: POINTER_FLAGS(0), last_report: [0; 10] }
+        Injector { device, screen, last_flags: POINTER_FLAGS(0), last_report: [0; 10], pen_buttons }
     }
 
     fn send(&mut self, r: &[u8]) {
@@ -98,8 +181,9 @@ impl Injector {
         };
         self.last_flags = flags;
 
-        let barrel = r[1] & PEN_BARREL_BIT != 0;
-        let eraser = r[1] & PEN_ERASER_BIT != 0;
+        let held = |wanted: Action| self.pen_buttons.iter().any(|(bit, action)| r[1] & bit != 0 && *action == wanted);
+        let barrel = held(Action::Barrel);
+        let eraser = held(Action::Eraser);
         let mut pen_flags = 0u32;
         let mut pointer_flags = flags;
         if barrel {
@@ -184,9 +268,12 @@ fn main() {
     let print_only = mode.as_deref() == Some("print");
     let buttons_only = mode.as_deref() == Some("buttons");
     let mut last_seen: std::collections::HashMap<u8, Vec<u8>> = Default::default();
-    let mut injector = (!print_only).then(Injector::new);
+    let buttons = load_buttons();
+    let mut injector = (!print_only)
+        .then(|| Injector::new([(PEN_BARREL_BIT, buttons.pen_lower.clone()), (PEN_ERASER_BIT, buttons.pen_upper.clone())]));
     unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) }.ok();
     let mut tablet_buttons = 0u8;
+    let mut pen_buttons = 0u8;
     let mut buf = vec![0u8; size as usize];
     loop {
         match handle.read_interrupt(endpoint, &mut buf, Duration::from_millis(500)) {
@@ -201,16 +288,26 @@ fn main() {
             Ok(n) if n >= 2 && buf[0] == TABLET_REPORT && !print_only => {
                 let pressed = buf[1] & !tablet_buttons;
                 tablet_buttons = buf[1];
-                for (i, keys) in TABLET_KEYS.iter().enumerate() {
+                for (i, action) in buttons.tablet.iter().enumerate() {
                     if pressed & (1 << i) != 0 {
-                        press_keys(keys);
+                        run_action(action);
                     }
                 }
             }
-            Ok(n) if n >= 10 && buf[0] == PEN_REPORT => match injector.as_mut() {
-                Some(i) => i.send(&buf[..n]),
-                None => print_pen(&buf[..n]),
-            },
+            Ok(n) if n >= 10 && buf[0] == PEN_REPORT => {
+                let pressed = buf[1] & !pen_buttons;
+                pen_buttons = buf[1];
+                if pressed & PEN_BARREL_BIT != 0 {
+                    run_action(&buttons.pen_lower);
+                }
+                if pressed & PEN_ERASER_BIT != 0 {
+                    run_action(&buttons.pen_upper);
+                }
+                match injector.as_mut() {
+                    Some(i) => i.send(&buf[..n]),
+                    None => print_pen(&buf[..n]),
+                }
+            }
             Ok(_) => {}
             Err(rusb::Error::Timeout) => {}
             Err(e) => panic!("read: {e}"),
