@@ -2,7 +2,7 @@
 
 Small Windows tool for a Wacom Intuos (CTL-6100WL, USB `056A:0378`). It reads the tablet over WinUSB and gives pen pressure to Photoshop and Lightroom Classic through Windows Ink. The Wacom driver is not needed.
 
-Only the CTL-6100WL is supported. Other models need their own VID, PID and report layout in `src/main.rs`.
+Supported tablets: Wacom Intuos M (CTL-6100WL). Another tablet is one entry in `src/tablet.rs`, and the `probe` mode records what is needed to write it. See [docs/adding-a-tablet.md](docs/adding-a-tablet.md).
 
 ## Why
 
@@ -40,6 +40,7 @@ wacom.exe pen       the same, but keeps the terminal output
 wacom.exe mouse     mouse mode: normal cursor, tip is left click, no pressure
 wacom.exe print     print position and pressure, no tray icon
 wacom.exe buttons   print the raw bytes of button changes, no tray icon
+wacom.exe probe     guided recording for adding a new tablet, writes a report file
 ```
 
 Started with no arguments from a terminal, the tool keeps printing there. Started from the logon task or a double-click, it has no console window. Use `pen` to see the foreground app names while you set up per-app curves.
