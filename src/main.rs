@@ -140,6 +140,8 @@ const WINDOWS_MAX_PRESSURE: u32 = 1024;
 struct Injector {
     device: HSYNTHETICPOINTERDEVICE,
     screen: (i32, i32),
+    /// Part of the tablet (x offset, y offset, width, height) that has the screen's aspect ratio.
+    area: (i32, i32, i32, i32),
     last_flags: POINTER_FLAGS,
     last_report: [u8; 10],
     pen_buttons: [(u8, Action); 2],
@@ -150,7 +152,13 @@ impl Injector {
         let device = unsafe { CreateSyntheticPointerDevice(PT_PEN, 1, POINTER_FEEDBACK_DEFAULT) }
             .expect("CreateSyntheticPointerDevice");
         let screen = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
-        Injector { device, screen, last_flags: POINTER_FLAGS(0), last_report: [0; 10], pen_buttons }
+        let (width, height) = if MAX_X * screen.1 <= MAX_Y * screen.0 {
+            (MAX_X, MAX_X * screen.1 / screen.0)
+        } else {
+            (MAX_Y * screen.0 / screen.1, MAX_Y)
+        };
+        let area = ((MAX_X - width) / 2, (MAX_Y - height) / 2, width, height);
+        Injector { device, screen, area, last_flags: POINTER_FLAGS(0), last_report: [0; 10], pen_buttons }
     }
 
     fn send(&mut self, r: &[u8]) {
@@ -203,8 +211,8 @@ impl Injector {
                         pointerId: 0,
                         pointerFlags: pointer_flags,
                         ptPixelLocation: POINT {
-                            x: x * self.screen.0 / MAX_X,
-                            y: y * self.screen.1 / MAX_Y,
+                            x: ((x - self.area.0) * self.screen.0 / self.area.2).clamp(0, self.screen.0 - 1),
+                            y: ((y - self.area.1) * self.screen.1 / self.area.3).clamp(0, self.screen.1 - 1),
                         },
                         ..Default::default()
                     },
