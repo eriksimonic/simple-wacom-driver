@@ -2,9 +2,7 @@ name: build
 
 on:
   push:
-    branches: [main]
     tags: ['v*']
-  pull_request:
 
 permissions:
   contents: write
@@ -34,7 +32,7 @@ jobs:
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
-          $version = if ("${{ github.ref }}" -like 'refs/tags/v*') { "${{ github.ref_name }}".TrimStart('v') } else { '0.0.0' }
+          $version = "${{ github.ref_name }}".TrimStart('v')
           & $iscc "/DAppVersion=$version" installer/setup.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
 
@@ -53,7 +51,6 @@ jobs:
             installer/Output/simple-wacom-driver-setup.exe
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "${{ github.ref_name }}" simple-wacom-driver.zip installer/Output/simple-wacom-driver-setup.exe --generate-notes
