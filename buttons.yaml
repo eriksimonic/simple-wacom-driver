@@ -9,3 +9,6 @@ tablet3: ctrl+alt+z
 tablet4: ctrl+shift+z
 pen_lower: barrel
 pen_upper: eraser
+
+# Pressure curve for pen mode. Below 1 makes light pressure count for more, 1 is linear. Try 0.4 to 1.0.
+pressure_gamma: 0.6

@@ -44,6 +44,8 @@ struct Buttons {
     tablet: [Action; 4],
     pen_lower: Action,
     pen_upper: Action,
+    /// Pressure curve exponent: below 1 boosts light pressure, 1 is linear.
+    pressure_gamma: f32,
 }
 
 fn parse_key(name: &str) -> Option<VIRTUAL_KEY> {
@@ -87,6 +89,7 @@ fn load_buttons() -> Buttons {
         tablet: [keys("b"), keys("e"), keys("ctrl+alt+z"), keys("ctrl+shift+z")],
         pen_lower: Action::Barrel,
         pen_upper: Action::Eraser,
+        pressure_gamma: 0.6,
     };
     let Ok(text) = std::fs::read_to_string(CONFIG_FILE) else {
         println!("no {CONFIG_FILE}, using default buttons");
@@ -98,6 +101,15 @@ fn load_buttons() -> Buttons {
             continue;
         }
         let (name, value) = line.split_once(':').unwrap_or_else(|| panic!("{CONFIG_FILE} line {}: expected name: value", i + 1));
+        if name.trim() == "pressure_gamma" {
+            buttons.pressure_gamma = value
+                .trim()
+                .parse()
+                .ok()
+                .filter(|g: &f32| *g > 0.0)
+                .unwrap_or_else(|| panic!("{CONFIG_FILE} line {}: pressure_gamma must be a number above 0", i + 1));
+            continue;
+        }
         let action = parse_action(value).unwrap_or_else(|| panic!("{CONFIG_FILE} line {}: bad action '{}'", i + 1, value.trim()));
         match name.trim() {
             "tablet1" => buttons.tablet[0] = action,
@@ -218,13 +230,14 @@ struct Injector {
     last_flags: POINTER_FLAGS,
     last_report: [u8; 10],
     pen_buttons: [(u8, Action); 2],
+    pressure_gamma: f32,
 }
 
 impl Injector {
-    fn new(pen_buttons: [(u8, Action); 2]) -> Self {
+    fn new(pen_buttons: [(u8, Action); 2], pressure_gamma: f32) -> Self {
         let device = unsafe { CreateSyntheticPointerDevice(PT_PEN, 1, POINTER_FEEDBACK_NONE) }
             .expect("CreateSyntheticPointerDevice");
-        Injector { device, mapper: Mapper::new(), last_flags: POINTER_FLAGS(0), last_report: [0; 10], pen_buttons }
+        Injector { device, mapper: Mapper::new(), last_flags: POINTER_FLAGS(0), last_report: [0; 10], pen_buttons, pressure_gamma }
     }
 
     fn send(&mut self, r: &[u8]) {
@@ -282,7 +295,7 @@ impl Injector {
                     },
                     penFlags: pen_flags,
                     penMask: PEN_MASK_PRESSURE,
-                    pressure: pressure * WINDOWS_MAX_PRESSURE / MAX_PRESSURE as u32,
+                    pressure: ((pressure as f32 / MAX_PRESSURE as f32).powf(self.pressure_gamma) * WINDOWS_MAX_PRESSURE as f32) as u32,
                     ..Default::default()
                 },
             },
@@ -345,7 +358,7 @@ fn main() {
     let pen_buttons = || [(PEN_BARREL_BIT, buttons.pen_lower.clone()), (PEN_ERASER_BIT, buttons.pen_upper.clone())];
     let mut mouse = mouse_mode.then(|| MouseInjector::new(pen_buttons()));
     let mut injector = (!print_only && !mouse_mode)
-        .then(|| Injector::new(pen_buttons()));
+        .then(|| Injector::new(pen_buttons(), buttons.pressure_gamma));
     unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) }.ok();
     let mut tablet_buttons = 0u8;
     let mut pen_buttons = 0u8;
