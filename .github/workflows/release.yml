@@ -1,0 +1,37 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/wacom.exe, buttons.yaml, install.ps1, uninstall.ps1, README.md dist/
+          Compress-Archive -Path dist/* -DestinationPath simple-wacom-driver.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: simple-wacom-driver
+          path: simple-wacom-driver.zip
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" simple-wacom-driver.zip --generate-notes
