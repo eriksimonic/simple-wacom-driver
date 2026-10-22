@@ -9,6 +9,7 @@ use windows::Win32::UI::Controls::{
     CreateSyntheticPointerDevice, HSYNTHETICPOINTERDEVICE, POINTER_FEEDBACK_DEFAULT,
     POINTER_TYPE_INFO, POINTER_TYPE_INFO_0,
 };
+use windows::Win32::UI::HiDpi::SetProcessDPIAware;
 use windows::Win32::UI::Input::Pointer::{
     InjectSyntheticPointerInput, POINTER_FLAGS, POINTER_FLAG_DOWN, POINTER_FLAG_FIRSTBUTTON, POINTER_FLAG_INCONTACT,
     POINTER_FLAG_INRANGE, POINTER_FLAG_NEW, POINTER_FLAG_SECONDBUTTON, POINTER_FLAG_UPDATE, POINTER_FLAG_UP,
@@ -151,6 +152,8 @@ impl Injector {
     fn new(pen_buttons: [(u8, Action); 2]) -> Self {
         let device = unsafe { CreateSyntheticPointerDevice(PT_PEN, 1, POINTER_FEEDBACK_DEFAULT) }
             .expect("CreateSyntheticPointerDevice");
+        // without this, GetSystemMetrics returns the screen size divided by the display scale
+        unsafe { SetProcessDPIAware() };
         let screen = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
         let (width, height) = if MAX_X * screen.1 <= MAX_Y * screen.0 {
             (MAX_X, MAX_X * screen.1 / screen.0)
