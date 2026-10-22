@@ -88,6 +88,7 @@ fn main() {
     let mut waiting = false;
     loop {
         tray::STATE.store(tray::WAITING, Ordering::Relaxed);
+        tray::clear_battery();
         let Some(Connection { handle, endpoint, size, tablet }) = open_tablet() else {
             if !waiting {
                 println!("waiting for a tablet (is it plugged in and bound to WinUSB?)");
@@ -138,6 +139,8 @@ fn main() {
                         run_action(action);
                     }
                 }
+            } else if let Some((percent, charging)) = tablet.parse_battery(report) {
+                tray::set_battery(percent, charging);
             } else if let Some(pen) = tablet.parse_pen(report) {
                 if !print_only && pen.lower_button && !lower_down {
                     run_action(&buttons.pen_lower);

@@ -30,7 +30,7 @@ In Photoshop, turn on Preferences > Tablet > Use Windows Ink and restart it.
 
 ## Tray icon
 
-A tray icon shows the state. Right-click for the status line, "Open buttons.yaml" and Exit. If you cannot see the icon, check the hidden icons arrow in the taskbar.
+A tray icon shows the state, and the tooltip shows the tablet's battery level. Right-click for the status line, "Open buttons.yaml" and Exit. If you cannot see the icon, check the hidden icons arrow in the taskbar.
 
 ## Modes
 
@@ -44,6 +44,8 @@ wacom.exe probe     guided recording for adding a new tablet, writes a report fi
 ```
 
 Started with no arguments from a terminal, the tool keeps printing there. Started from the logon task or a double-click, it has no console window. Use `pen` to see the foreground app names while you set up per-app curves.
+
+The tablet must be connected with the USB cable. Bluetooth is not supported: the tool reads the USB endpoint through WinUSB, and a Bluetooth tablet has none.
 
 If the tablet is unplugged, the tool waits and reconnects when it comes back.
 

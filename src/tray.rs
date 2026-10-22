@@ -31,11 +31,15 @@ const CALLBACK: u32 = WM_APP + 1;
 const MENU_OPEN_CONFIG: usize = 1;
 const MENU_EXIT: usize = 2;
 const TIMER_ID: usize = 1;
-const NOT_SHOWN: u8 = 255;
+const NOT_SHOWN: u32 = u32::MAX;
+const NO_BATTERY: u8 = 255;
 
 static ICONS: [AtomicIsize; 2] = [AtomicIsize::new(0), AtomicIsize::new(0)];
 static ADDED: AtomicBool = AtomicBool::new(false);
-static SHOWN: AtomicU8 = AtomicU8::new(NOT_SHOWN);
+static SHOWN: AtomicU32 = AtomicU32::new(NOT_SHOWN);
+/// Battery percent, or `NO_BATTERY` when unknown. Written by the reader loop.
+static BATTERY: AtomicU8 = AtomicU8::new(NO_BATTERY);
+static CHARGING: AtomicBool = AtomicBool::new(false);
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 static INFO: OnceLock<(String, std::path::PathBuf)> = OnceLock::new();
 
@@ -70,10 +74,29 @@ fn make_icon(size: i32, (r, g, b): (u8, u8, u8)) -> HICON {
     }
 }
 
+pub fn set_battery(percent: u8, charging: bool) {
+    BATTERY.store(percent, Ordering::Relaxed);
+    CHARGING.store(charging, Ordering::Relaxed);
+}
+
+pub fn clear_battery() {
+    BATTERY.store(NO_BATTERY, Ordering::Relaxed);
+}
+
 fn tooltip(state: u8) -> String {
     let mode = &INFO.get().unwrap().0;
     let status = if state == CONNECTED { "tablet connected" } else { "waiting for the tablet" };
-    format!("Simple Wacom driver ({mode} mode): {status}")
+    let battery = match BATTERY.load(Ordering::Relaxed) {
+        NO_BATTERY => String::new(),
+        percent if CHARGING.load(Ordering::Relaxed) => format!(", battery {percent}%, charging"),
+        percent => format!(", battery {percent}%"),
+    };
+    format!("Simple Wacom driver ({mode} mode): {status}{battery}")
+}
+
+/// Everything the tooltip shows, as one number, to detect a change.
+fn shown_signature(state: u8) -> u32 {
+    state as u32 | (BATTERY.load(Ordering::Relaxed) as u32) << 8 | (CHARGING.load(Ordering::Relaxed) as u32) << 16
 }
 
 fn notify(hwnd: HWND, action: windows::Win32::UI::Shell::NOTIFY_ICON_MESSAGE, state: u8) -> bool {
@@ -99,11 +122,11 @@ fn refresh(hwnd: HWND) {
     if !ADDED.load(Ordering::Relaxed) {
         if notify(hwnd, NIM_ADD, state) {
             ADDED.store(true, Ordering::Relaxed);
-            SHOWN.store(state, Ordering::Relaxed);
+            SHOWN.store(shown_signature(state), Ordering::Relaxed);
         }
-    } else if SHOWN.load(Ordering::Relaxed) != state {
+    } else if SHOWN.load(Ordering::Relaxed) != shown_signature(state) {
         notify(hwnd, NIM_MODIFY, state);
-        SHOWN.store(state, Ordering::Relaxed);
+        SHOWN.store(shown_signature(state), Ordering::Relaxed);
     }
 }
 

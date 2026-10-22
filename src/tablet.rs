@@ -45,12 +45,22 @@ pub struct InitReport {
     pub data: &'static [u8],
 }
 
+/// The report that carries the battery state.
+pub struct BatteryReport {
+    pub id: u8,
+    pub offset: usize,
+    /// Mask of the charge percentage, and of the charging flag, in the byte at `offset`.
+    pub level: u8,
+    pub charging: u8,
+}
+
 pub struct Tablet {
     pub name: &'static str,
     pub vid: u16,
     pub pid: u16,
     pub pen: PenReport,
     pub buttons: Option<ButtonReport>,
+    pub battery: Option<BatteryReport>,
     pub init: &'static [InitReport],
 }
 
@@ -82,6 +92,16 @@ impl Tablet {
             y: pen.y.read(report) as i32,
             pressure: pen.pressure.read(report),
         })
+    }
+
+    /// Battery percentage and whether it is charging.
+    pub fn parse_battery(&self, report: &[u8]) -> Option<(u8, bool)> {
+        let battery = self.battery.as_ref()?;
+        if report.first() != Some(&battery.id) || report.len() <= battery.offset {
+            return None;
+        }
+        let byte = report[battery.offset];
+        Some((byte & battery.level, byte & battery.charging != 0))
     }
 
     /// Bit mask of the pressed tablet buttons.
@@ -116,5 +136,6 @@ const WACOM_INTUOS_M_CTL_6100WL: Tablet = Tablet {
         max_pressure: 4095,
     },
     buttons: Some(ButtonReport { id: 0x11, offset: 1 }),
+    battery: Some(BatteryReport { id: 0x13, offset: 1, level: 0x7f, charging: 0x80 }),
     init: &[],
 };
