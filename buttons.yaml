@@ -12,3 +12,8 @@ pen_upper: eraser
 
 # Pressure curve for pen mode. Below 1 makes light pressure count for more, above 1 for less, 1 is linear.
 pressure_gamma: 1.2
+
+# Per-app gamma, overrides pressure_gamma while that program is in the foreground.
+# Name is pressure_gamma.<exe name>. The tool prints the exe name each time the foreground app changes.
+# pressure_gamma.photoshop.exe: 0.8
+# pressure_gamma.lightroom.exe: 1.2

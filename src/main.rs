@@ -14,13 +14,18 @@ use windows::Win32::UI::Input::Pointer::{
     POINTER_FLAG_INRANGE, POINTER_FLAG_NEW, POINTER_FLAG_SECONDBUTTON, POINTER_FLAG_UPDATE, POINTER_FLAG_UP,
     POINTER_INFO, POINTER_PEN_INFO,
 };
-use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
+use windows::core::PWSTR;
+use windows::Win32::Foundation::CloseHandle;
+use windows::Win32::System::Threading::{
+    GetCurrentThread, OpenProcess, QueryFullProcessImageNameW, SetThreadPriority, PROCESS_NAME_FORMAT,
+    PROCESS_QUERY_LIMITED_INFORMATION, THREAD_PRIORITY_HIGHEST,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
     VIRTUAL_KEY, VK_CONTROL, VK_MENU, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, SetProcessDPIAware, PEN_FLAG_BARREL, PEN_FLAG_ERASER, PEN_FLAG_INVERTED, PEN_MASK_PRESSURE, PT_PEN, SM_CXSCREEN, SM_CYSCREEN,
+    GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, SetProcessDPIAware, PEN_FLAG_BARREL, PEN_FLAG_ERASER, PEN_FLAG_INVERTED, PEN_MASK_PRESSURE, PT_PEN, SM_CXSCREEN, SM_CYSCREEN,
 };
 
 const PEN_REPORT: u8 = 0x10;
@@ -46,6 +51,8 @@ struct Buttons {
     pen_upper: Action,
     /// Pressure curve exponent: below 1 boosts light pressure, above 1 softens it, 1 is linear.
     pressure_gamma: f32,
+    /// Lowercase exe name and gamma, overriding `pressure_gamma` while that app is in the foreground.
+    app_gamma: Vec<(String, f32)>,
 }
 
 fn parse_key(name: &str) -> Option<VIRTUAL_KEY> {
@@ -90,6 +97,7 @@ fn load_buttons() -> Buttons {
         pen_lower: Action::Barrel,
         pen_upper: Action::Eraser,
         pressure_gamma: 1.2,
+        app_gamma: Vec::new(),
     };
     let Ok(text) = std::fs::read_to_string(CONFIG_FILE) else {
         println!("no {CONFIG_FILE}, using default buttons");
@@ -101,17 +109,22 @@ fn load_buttons() -> Buttons {
             continue;
         }
         let (name, value) = line.split_once(':').unwrap_or_else(|| panic!("{CONFIG_FILE} line {}: expected name: value", i + 1));
-        if name.trim() == "pressure_gamma" {
-            buttons.pressure_gamma = value
+        let name = name.trim();
+        if name == "pressure_gamma" || name.starts_with("pressure_gamma.") {
+            let gamma = value
                 .trim()
                 .parse()
                 .ok()
                 .filter(|g: &f32| *g > 0.0)
-                .unwrap_or_else(|| panic!("{CONFIG_FILE} line {}: pressure_gamma must be a number above 0", i + 1));
+                .unwrap_or_else(|| panic!("{CONFIG_FILE} line {}: gamma must be a number above 0", i + 1));
+            match name.strip_prefix("pressure_gamma.") {
+                Some(exe) => buttons.app_gamma.push((exe.to_ascii_lowercase(), gamma)),
+                None => buttons.pressure_gamma = gamma,
+            }
             continue;
         }
         let action = parse_action(value).unwrap_or_else(|| panic!("{CONFIG_FILE} line {}: bad action '{}'", i + 1, value.trim()));
-        match name.trim() {
+        match name {
             "tablet1" => buttons.tablet[0] = action,
             "tablet2" => buttons.tablet[1] = action,
             "tablet3" => buttons.tablet[2] = action,
@@ -147,6 +160,27 @@ const MAX_PRESSURE: u16 = 4095;
 const MAX_X: i32 = 21600;
 const MAX_Y: i32 = 13500;
 const WINDOWS_MAX_PRESSURE: u32 = 1024;
+
+/// Lowercase exe file name of the foreground window's process, with the window handle for change detection.
+fn foreground_exe() -> (isize, Option<String>) {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return (hwnd.0 as isize, None);
+        };
+        let mut path = [0u16; 520];
+        let mut len = path.len() as u32;
+        let queried = QueryFullProcessImageNameW(process, PROCESS_NAME_FORMAT(0), PWSTR(path.as_mut_ptr()), &mut len);
+        let _ = CloseHandle(process);
+        let exe = queried.ok().and_then(|_| {
+            let path = String::from_utf16_lossy(&path[..len as usize]);
+            path.rsplit('\\').next().map(str::to_ascii_lowercase)
+        });
+        (hwnd.0 as isize, exe)
+    }
+}
 
 /// Maps tablet coordinates onto the primary screen, using the part of the tablet that has the screen's aspect ratio.
 struct Mapper {
@@ -230,14 +264,40 @@ struct Injector {
     last_flags: POINTER_FLAGS,
     last_report: [u8; 10],
     pen_buttons: [(u8, Action); 2],
+    default_gamma: f32,
+    app_gamma: Vec<(String, f32)>,
     pressure_gamma: f32,
+    foreground: isize,
 }
 
 impl Injector {
-    fn new(pen_buttons: [(u8, Action); 2], pressure_gamma: f32) -> Self {
+    fn new(pen_buttons: [(u8, Action); 2], default_gamma: f32, app_gamma: Vec<(String, f32)>) -> Self {
         let device = unsafe { CreateSyntheticPointerDevice(PT_PEN, 1, POINTER_FEEDBACK_NONE) }
             .expect("CreateSyntheticPointerDevice");
-        Injector { device, mapper: Mapper::new(), last_flags: POINTER_FLAGS(0), last_report: [0; 10], pen_buttons, pressure_gamma }
+        Injector {
+            device,
+            mapper: Mapper::new(),
+            last_flags: POINTER_FLAGS(0),
+            last_report: [0; 10],
+            pen_buttons,
+            default_gamma,
+            app_gamma,
+            pressure_gamma: default_gamma,
+            foreground: 0,
+        }
+    }
+
+    /// Picks the gamma for the foreground app. Looks up the process only when the foreground window changes.
+    fn update_gamma(&mut self) {
+        let hwnd = unsafe { GetForegroundWindow() }.0 as isize;
+        if hwnd == self.foreground {
+            return;
+        }
+        let (hwnd, exe) = foreground_exe();
+        self.foreground = hwnd;
+        let override_gamma = exe.as_ref().and_then(|exe| self.app_gamma.iter().find(|(name, _)| name == exe));
+        self.pressure_gamma = override_gamma.map_or(self.default_gamma, |(_, gamma)| *gamma);
+        println!("foreground {}, pressure_gamma {}", exe.as_deref().unwrap_or("unknown"), self.pressure_gamma);
     }
 
     fn send(&mut self, r: &[u8]) {
@@ -245,6 +305,7 @@ impl Injector {
             return;
         }
         self.last_report.copy_from_slice(&r[..10]);
+        self.update_gamma();
         let in_range = r[1] & 0x20 != 0;
         let tip = r[1] & 0x01 != 0;
         let x = u16::from_le_bytes([r[2], r[3]]) as i32;
@@ -358,7 +419,7 @@ fn main() {
     let pen_buttons = || [(PEN_BARREL_BIT, buttons.pen_lower.clone()), (PEN_ERASER_BIT, buttons.pen_upper.clone())];
     let mut mouse = mouse_mode.then(|| MouseInjector::new(pen_buttons()));
     let mut injector = (!print_only && !mouse_mode)
-        .then(|| Injector::new(pen_buttons(), buttons.pressure_gamma));
+        .then(|| Injector::new(pen_buttons(), buttons.pressure_gamma, buttons.app_gamma.clone()));
     unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) }.ok();
     let mut tablet_buttons = 0u8;
     let mut pen_buttons = 0u8;
