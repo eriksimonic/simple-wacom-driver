@@ -6,7 +6,7 @@ const CTL6100WL_PID: u16 = 0x0378;
 
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::Controls::{
-    CreateSyntheticPointerDevice, HSYNTHETICPOINTERDEVICE, POINTER_FEEDBACK_DEFAULT,
+    CreateSyntheticPointerDevice, HSYNTHETICPOINTERDEVICE, POINTER_FEEDBACK_NONE,
     POINTER_TYPE_INFO, POINTER_TYPE_INFO_0,
 };
 use windows::Win32::UI::Input::Pointer::{
@@ -149,7 +149,7 @@ struct Injector {
 
 impl Injector {
     fn new(pen_buttons: [(u8, Action); 2]) -> Self {
-        let device = unsafe { CreateSyntheticPointerDevice(PT_PEN, 1, POINTER_FEEDBACK_DEFAULT) }
+        let device = unsafe { CreateSyntheticPointerDevice(PT_PEN, 1, POINTER_FEEDBACK_NONE) }
             .expect("CreateSyntheticPointerDevice");
         // without this, GetSystemMetrics returns the screen size divided by the display scale
         let _ = unsafe { SetProcessDPIAware() };
