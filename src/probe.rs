@@ -50,8 +50,22 @@ impl Stats {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+}
+
+/// The first interrupt IN endpoint: interface number, address and max packet size.
+pub fn find_endpoint(config: &rusb::ConfigDescriptor) -> Option<(u8, u8, u16)> {
+    config
+        .interfaces()
+        .flat_map(|iface| iface.descriptors().collect::<Vec<_>>())
+        .flat_map(|desc| {
+            desc.endpoint_descriptors()
+                .map(move |ep| (desc.interface_number(), ep))
+                .collect::<Vec<_>>()
+        })
+        .find(|(_, ep)| ep.direction() == Direction::In && ep.transfer_type() == TransferType::Interrupt)
+        .map(|(interface, ep)| (interface, ep.address(), ep.max_packet_size()))
 }
 
 fn ask(prompt: &str) -> String {
@@ -179,7 +193,6 @@ pub fn run(args: &[String]) {
     let _ = writeln!(report, "- manufacturer: {manufacturer}, product: {product}");
 
     let config = device.active_config_descriptor().expect("config descriptor");
-    let mut endpoint = None;
     let mut hid_interface = None;
     let _ = writeln!(report, "\n## Interfaces and endpoints\n");
     for iface in config.interfaces() {
@@ -190,13 +203,10 @@ pub fn run(args: &[String]) {
             }
             for ep in desc.endpoint_descriptors() {
                 let _ = writeln!(report, "  - endpoint {:#04x} {:?} {:?}, max packet {}", ep.address(), ep.direction(), ep.transfer_type(), ep.max_packet_size());
-                if ep.direction() == Direction::In && ep.transfer_type() == TransferType::Interrupt && endpoint.is_none() {
-                    endpoint = Some((desc.interface_number(), ep.address(), ep.max_packet_size()));
-                }
             }
         }
     }
-    let (interface, endpoint, size) = endpoint.expect("no interrupt IN endpoint found");
+    let (interface, endpoint, size) = find_endpoint(&config).expect("no interrupt IN endpoint found");
     handle.claim_interface(interface).expect("claim interface");
 
     if let Some(iface) = hid_interface {

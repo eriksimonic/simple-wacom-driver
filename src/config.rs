@@ -2,11 +2,15 @@
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY,
-    VK_CONTROL, VK_MENU, VK_SHIFT,
+    VK_BACK, VK_CONTROL, VK_DELETE, VK_ESCAPE, VK_F1, VK_LWIN, VK_MENU, VK_OEM_4, VK_OEM_6, VK_OEM_MINUS,
+    VK_OEM_PLUS, VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB,
 };
 
+use crate::tablet::PenState;
+
 const CONFIG_FILE: &str = "buttons.yaml";
-const TABLET_BUTTONS: usize = 8;
+/// Tablet buttons are reported as one bit each in a byte, so no tablet can have more than this.
+const MAX_TABLET_BUTTONS: usize = u8::BITS as usize;
 
 #[derive(Clone, PartialEq)]
 pub enum Action {
@@ -17,15 +21,40 @@ pub enum Action {
     Keys(Vec<VIRTUAL_KEY>),
 }
 
+/// What the two side buttons on the pen do.
+#[derive(Clone)]
+pub struct PenButtons {
+    pub lower: Action,
+    pub upper: Action,
+}
+
+impl PenButtons {
+    /// True when a pen button that is held down is set to `wanted` in the config.
+    pub fn held(&self, pen: &PenState, wanted: &Action) -> bool {
+        (pen.lower_button && self.lower == *wanted) || (pen.upper_button && self.upper == *wanted)
+    }
+}
+
+/// A pressure curve exponent for one app, matched on its lowercase exe name.
+#[derive(Clone)]
+pub struct AppGamma {
+    pub exe: String,
+    pub gamma: f32,
+}
+
+/// Pressure curve exponent: below 1 boosts light pressure, above 1 softens it, 1 is linear.
+#[derive(Clone)]
+pub struct Pressure {
+    pub gamma: f32,
+    /// Overrides `gamma` while that app is in the foreground.
+    pub apps: Vec<AppGamma>,
+}
+
 pub struct Buttons {
     /// Buttons on the tablet, in the order the tablet numbers them.
     pub tablet: Vec<Action>,
-    pub pen_lower: Action,
-    pub pen_upper: Action,
-    /// Pressure curve exponent: below 1 boosts light pressure, above 1 softens it, 1 is linear.
-    pub pressure_gamma: f32,
-    /// Lowercase exe name and gamma, overriding `pressure_gamma` while that app is in the foreground.
-    pub app_gamma: Vec<(String, f32)>,
+    pub pen: PenButtons,
+    pub pressure: Pressure,
 }
 
 fn parse_key(name: &str) -> Option<VIRTUAL_KEY> {
@@ -34,20 +63,21 @@ fn parse_key(name: &str) -> Option<VIRTUAL_KEY> {
         "ctrl" => VK_CONTROL.0,
         "shift" => VK_SHIFT.0,
         "alt" => VK_MENU.0,
-        "win" => 0x5B,
-        "space" => 0x20,
-        "tab" => 0x09,
-        "enter" => 0x0D,
-        "esc" => 0x1B,
-        "backspace" => 0x08,
-        "delete" => 0x2E,
-        "[" => 0xDB,
-        "]" => 0xDD,
-        "plus" => 0xBB,
-        "minus" => 0xBD,
-        f if f.starts_with('f') && f[1..].parse::<u16>().is_ok_and(|n| (1..=12).contains(&n)) => {
-            0x70 + f[1..].parse::<u16>().unwrap() - 1
-        }
+        "win" => VK_LWIN.0,
+        "space" => VK_SPACE.0,
+        "tab" => VK_TAB.0,
+        "enter" => VK_RETURN.0,
+        "esc" => VK_ESCAPE.0,
+        "backspace" => VK_BACK.0,
+        "delete" => VK_DELETE.0,
+        "[" => VK_OEM_4.0,
+        "]" => VK_OEM_6.0,
+        "plus" => VK_OEM_PLUS.0,
+        "minus" => VK_OEM_MINUS.0,
+        f if f.starts_with('f') => match f[1..].parse::<u16>() {
+            Ok(n) if (1..=12).contains(&n) => VK_F1.0 + n - 1,
+            _ => return None,
+        },
         c if c.len() == 1 && c.as_bytes()[0].is_ascii_alphanumeric() => c.to_ascii_uppercase().as_bytes()[0] as u16,
         _ => return None,
     };
@@ -74,14 +104,12 @@ pub fn config_path() -> std::path::PathBuf {
 
 pub fn load_buttons() -> Buttons {
     let keys = |s: &str| parse_action(s).unwrap();
-    let mut tablet = vec![Action::None; TABLET_BUTTONS];
+    let mut tablet = vec![Action::None; MAX_TABLET_BUTTONS];
     tablet[..4].clone_from_slice(&[keys("b"), keys("e"), keys("ctrl+alt+z"), keys("ctrl+shift+z")]);
     let mut buttons = Buttons {
         tablet,
-        pen_lower: Action::Barrel,
-        pen_upper: Action::Eraser,
-        pressure_gamma: 1.2,
-        app_gamma: Vec::new(),
+        pen: PenButtons { lower: Action::Barrel, upper: Action::Eraser },
+        pressure: Pressure { gamma: 1.2, apps: Vec::new() },
     };
     let Ok(text) = std::fs::read_to_string(config_path()) else {
         println!("no {CONFIG_FILE}, using default buttons");
@@ -102,17 +130,17 @@ pub fn load_buttons() -> Buttons {
                 .filter(|g: &f32| *g > 0.0)
                 .unwrap_or_else(|| panic!("{CONFIG_FILE} line {}: gamma must be a number above 0", i + 1));
             match name.strip_prefix("pressure_gamma.") {
-                Some(exe) => buttons.app_gamma.push((exe.to_ascii_lowercase(), gamma)),
-                None => buttons.pressure_gamma = gamma,
+                Some(exe) => buttons.pressure.apps.push(AppGamma { exe: exe.to_ascii_lowercase(), gamma }),
+                None => buttons.pressure.gamma = gamma,
             }
             continue;
         }
         let action = parse_action(value).unwrap_or_else(|| panic!("{CONFIG_FILE} line {}: bad action '{}'", i + 1, value.trim()));
         match name {
-            "pen_lower" => buttons.pen_lower = action,
-            "pen_upper" => buttons.pen_upper = action,
+            "pen_lower" => buttons.pen.lower = action,
+            "pen_upper" => buttons.pen.upper = action,
             other => match other.strip_prefix("tablet").and_then(|n| n.parse::<usize>().ok()) {
-                Some(n) if (1..=TABLET_BUTTONS).contains(&n) => buttons.tablet[n - 1] = action,
+                Some(n) if (1..=MAX_TABLET_BUTTONS).contains(&n) => buttons.tablet[n - 1] = action,
                 _ => panic!("{CONFIG_FILE} line {}: unknown button '{other}'", i + 1),
             },
         }

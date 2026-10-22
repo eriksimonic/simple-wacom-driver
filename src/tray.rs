@@ -21,11 +21,22 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_COMMAND, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
 };
 
-pub const WAITING: u8 = 0;
-pub const CONNECTED: u8 = 1;
+#[derive(Clone, Copy, PartialEq)]
+pub enum State {
+    Waiting,
+    Connected,
+}
 
-/// Written by the reader loop, read by the tray timer.
-pub static STATE: AtomicU8 = AtomicU8::new(WAITING);
+/// Written by the reader loop, read by the tray timer. Holds a `State` discriminant.
+static STATE: AtomicU8 = AtomicU8::new(State::Waiting as u8);
+
+pub fn set_state(state: State) {
+    STATE.store(state as u8, Ordering::Relaxed);
+}
+
+fn state() -> State {
+    if STATE.load(Ordering::Relaxed) == State::Connected as u8 { State::Connected } else { State::Waiting }
+}
 
 const CALLBACK: u32 = WM_APP + 1;
 const MENU_OPEN_CONFIG: usize = 1;
@@ -83,9 +94,9 @@ pub fn clear_battery() {
     BATTERY.store(NO_BATTERY, Ordering::Relaxed);
 }
 
-fn tooltip(state: u8) -> String {
+fn tooltip(state: State) -> String {
     let mode = &INFO.get().unwrap().0;
-    let status = if state == CONNECTED { "tablet connected" } else { "waiting for the tablet" };
+    let status = if state == State::Connected { "tablet connected" } else { "waiting for the tablet" };
     let battery = match BATTERY.load(Ordering::Relaxed) {
         NO_BATTERY => String::new(),
         percent if CHARGING.load(Ordering::Relaxed) => format!(", battery {percent}%, charging"),
@@ -95,11 +106,11 @@ fn tooltip(state: u8) -> String {
 }
 
 /// Everything the tooltip shows, as one number, to detect a change.
-fn shown_signature(state: u8) -> u32 {
+fn shown_signature(state: State) -> u32 {
     state as u32 | (BATTERY.load(Ordering::Relaxed) as u32) << 8 | (CHARGING.load(Ordering::Relaxed) as u32) << 16
 }
 
-fn notify(hwnd: HWND, action: windows::Win32::UI::Shell::NOTIFY_ICON_MESSAGE, state: u8) -> bool {
+fn notify(hwnd: HWND, action: windows::Win32::UI::Shell::NOTIFY_ICON_MESSAGE, state: State) -> bool {
     let mut data = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
@@ -118,7 +129,7 @@ fn notify(hwnd: HWND, action: windows::Win32::UI::Shell::NOTIFY_ICON_MESSAGE, st
 /// Adds the icon, or updates it when the state changed. Also retries the add, because the task can start
 /// before Explorer has created the tray.
 fn refresh(hwnd: HWND) {
-    let state = STATE.load(Ordering::Relaxed);
+    let state = state();
     if !ADDED.load(Ordering::Relaxed) {
         if notify(hwnd, NIM_ADD, state) {
             ADDED.store(true, Ordering::Relaxed);
@@ -131,7 +142,7 @@ fn refresh(hwnd: HWND) {
 }
 
 fn show_menu(hwnd: HWND) {
-    let status = wide(&tooltip(STATE.load(Ordering::Relaxed)));
+    let status = wide(&tooltip(state()));
     let open = wide("Open buttons.yaml");
     let exit = wide("Exit");
     unsafe {
@@ -159,7 +170,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
                 ShellExecuteW(hwnd, w!("open"), w!("notepad.exe"), PCWSTR(path.as_ptr()), None, SW_SHOWNORMAL);
             }
             MENU_EXIT => {
-                notify(hwnd, NIM_DELETE, STATE.load(Ordering::Relaxed));
+                notify(hwnd, NIM_DELETE, state());
                 std::process::exit(0);
             }
             _ => {}
@@ -179,8 +190,8 @@ pub fn spawn(mode: &str, config: std::path::PathBuf) {
     let _ = INFO.set((mode.to_string(), config));
     std::thread::spawn(|| unsafe {
         let size = GetSystemMetrics(SM_CXSMICON).max(16);
-        ICONS[WAITING as usize].store(make_icon(size, (140, 140, 140)).0 as isize, Ordering::Relaxed);
-        ICONS[CONNECTED as usize].store(make_icon(size, (40, 180, 70)).0 as isize, Ordering::Relaxed);
+        ICONS[State::Waiting as usize].store(make_icon(size, (140, 140, 140)).0 as isize, Ordering::Relaxed);
+        ICONS[State::Connected as usize].store(make_icon(size, (40, 180, 70)).0 as isize, Ordering::Relaxed);
         TASKBAR_CREATED.store(RegisterWindowMessageW(w!("TaskbarCreated")), Ordering::Relaxed);
 
         let instance = GetModuleHandleW(None).expect("GetModuleHandleW");

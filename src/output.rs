@@ -24,7 +24,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     PEN_FLAG_INVERTED, PEN_MASK_PRESSURE, PT_PEN, SM_CXSCREEN, SM_CYSCREEN,
 };
 
-use crate::config::Action;
+use crate::config::{Action, PenButtons, Pressure};
 use crate::tablet::{PenReport, PenState};
 
 const WINDOWS_MAX_PRESSURE: u32 = 1024;
@@ -50,55 +50,44 @@ fn foreground_exe() -> (isize, Option<String>) {
     }
 }
 
-/// Maps tablet coordinates onto the primary screen, using the part of the tablet that has the screen's aspect ratio.
-/// The screen size is read on every call, so resolution and display scale changes apply without a restart.
-struct Mapper;
-
-impl Mapper {
-    fn new() -> Self {
-        // per-monitor aware, so GetSystemMetrics always returns real pixels, also after a scale change
-        let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-        Mapper
-    }
-
-    fn screen(&self) -> (i32, i32) {
-        unsafe { (GetSystemMetrics(SM_CXSCREEN).max(2), GetSystemMetrics(SM_CYSCREEN).max(2)) }
-    }
-
-    fn map(&self, layout: &PenReport, pen: &PenState) -> (i32, i32) {
-        let screen = self.screen();
-        let (max_x, max_y) = (layout.max_x, layout.max_y);
-        let (width, height) = if max_x * screen.1 <= max_y * screen.0 {
-            (max_x, max_x * screen.1 / screen.0)
-        } else {
-            (max_y * screen.0 / screen.1, max_y)
-        };
-        let (left, top) = ((max_x - width) / 2, (max_y - height) / 2);
-        (
-            ((pen.x - left) * screen.0 / width).clamp(0, screen.0 - 1),
-            ((pen.y - top) * screen.1 / height).clamp(0, screen.1 - 1),
-        )
-    }
+/// Per-monitor aware, so GetSystemMetrics always returns real pixels, also after a scale change.
+fn init_dpi_awareness() {
+    let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
 }
 
-/// True when a pen button that is held down is set to `wanted` in the config.
-fn held(pen: &PenState, lower: &Action, upper: &Action, wanted: &Action) -> bool {
-    (pen.lower_button && lower == wanted) || (pen.upper_button && upper == wanted)
+/// The screen size is read on every call, so resolution and display scale changes apply without a restart.
+fn screen_size() -> (i32, i32) {
+    unsafe { (GetSystemMetrics(SM_CXSCREEN).max(2), GetSystemMetrics(SM_CYSCREEN).max(2)) }
+}
+
+/// Maps tablet coordinates onto the primary screen, using the part of the tablet that has the screen's aspect ratio.
+fn map_to_screen(layout: &PenReport, pen: &PenState) -> (i32, i32) {
+    let screen = screen_size();
+    let (max_x, max_y) = (layout.max_x, layout.max_y);
+    let (width, height) = if max_x * screen.1 <= max_y * screen.0 {
+        (max_x, max_x * screen.1 / screen.0)
+    } else {
+        (max_y * screen.0 / screen.1, max_y)
+    };
+    let (left, top) = ((max_x - width) / 2, (max_y - height) / 2);
+    (
+        ((pen.x - left) * screen.0 / width).clamp(0, screen.0 - 1),
+        ((pen.y - top) * screen.1 / height).clamp(0, screen.1 - 1),
+    )
 }
 
 /// Standard mouse mode: moves the normal cursor, tip is left click, barrel button is right click. No pressure.
 pub struct MouseInjector {
-    mapper: Mapper,
     tip: bool,
     barrel: bool,
     last: Option<PenState>,
-    pen_lower: Action,
-    pen_upper: Action,
+    buttons: PenButtons,
 }
 
 impl MouseInjector {
-    pub fn new(pen_lower: Action, pen_upper: Action) -> Self {
-        MouseInjector { mapper: Mapper::new(), tip: false, barrel: false, last: None, pen_lower, pen_upper }
+    pub fn new(buttons: PenButtons) -> Self {
+        init_dpi_awareness();
+        MouseInjector { tip: false, barrel: false, last: None, buttons }
     }
 
     pub fn send(&mut self, layout: &PenReport, pen: PenState) {
@@ -107,13 +96,13 @@ impl MouseInjector {
         }
         self.last = Some(pen);
         let tip = pen.in_range && pen.tip;
-        let barrel = held(&pen, &self.pen_lower, &self.pen_upper, &Action::Barrel);
+        let barrel = self.buttons.held(&pen, &Action::Barrel);
         if !pen.in_range && !self.tip && !self.barrel {
             return;
         }
 
-        let (px, py) = self.mapper.map(layout, &pen);
-        let (width, height) = self.mapper.screen();
+        let (px, py) = map_to_screen(layout, &pen);
+        let (width, height) = screen_size();
         let mouse = |dx: i32, dy: i32, flags| INPUT {
             r#type: INPUT_MOUSE,
             Anonymous: INPUT_0 { mi: MOUSEINPUT { dx, dy, dwFlags: flags, ..Default::default() } },
@@ -134,31 +123,27 @@ impl MouseInjector {
 /// Sends the pen to Windows as a synthetic pen, with pressure.
 pub struct Injector {
     device: HSYNTHETICPOINTERDEVICE,
-    mapper: Mapper,
     last_flags: POINTER_FLAGS,
     last: Option<PenState>,
-    pen_lower: Action,
-    pen_upper: Action,
-    default_gamma: f32,
-    app_gamma: Vec<(String, f32)>,
-    pressure_gamma: f32,
+    buttons: PenButtons,
+    pressure: Pressure,
+    /// Gamma in use: the default, or the override of the foreground app.
+    gamma: f32,
     foreground: isize,
 }
 
 impl Injector {
-    pub fn new(pen_lower: Action, pen_upper: Action, default_gamma: f32, app_gamma: Vec<(String, f32)>) -> Self {
+    pub fn new(buttons: PenButtons, pressure: Pressure) -> Self {
+        init_dpi_awareness();
         let device = unsafe { CreateSyntheticPointerDevice(PT_PEN, 1, POINTER_FEEDBACK_NONE) }
             .expect("CreateSyntheticPointerDevice");
         Injector {
             device,
-            mapper: Mapper::new(),
             last_flags: POINTER_FLAGS(0),
             last: None,
-            pen_lower,
-            pen_upper,
-            default_gamma,
-            app_gamma,
-            pressure_gamma: default_gamma,
+            buttons,
+            gamma: pressure.gamma,
+            pressure,
             foreground: 0,
         }
     }
@@ -175,9 +160,9 @@ impl Injector {
         let Some(exe) = exe else {
             return;
         };
-        let override_gamma = self.app_gamma.iter().find(|(name, _)| *name == exe);
-        self.pressure_gamma = override_gamma.map_or(self.default_gamma, |(_, gamma)| *gamma);
-        println!("foreground {exe}, pressure_gamma {}", self.pressure_gamma);
+        let override_gamma = self.pressure.apps.iter().find(|app| app.exe == exe);
+        self.gamma = override_gamma.map_or(self.pressure.gamma, |app| app.gamma);
+        println!("foreground {exe}, pressure_gamma {}", self.gamma);
     }
 
     pub fn send(&mut self, layout: &PenReport, pen: PenState) {
@@ -206,16 +191,16 @@ impl Injector {
 
         let mut pen_flags = 0u32;
         let mut pointer_flags = flags;
-        if held(&pen, &self.pen_lower, &self.pen_upper, &Action::Barrel) {
+        if self.buttons.held(&pen, &Action::Barrel) {
             pen_flags |= PEN_FLAG_BARREL;
             pointer_flags |= POINTER_FLAG_SECONDBUTTON;
         }
-        if held(&pen, &self.pen_lower, &self.pen_upper, &Action::Eraser) {
+        if self.buttons.held(&pen, &Action::Eraser) {
             pen_flags |= PEN_FLAG_INVERTED | PEN_FLAG_ERASER;
         }
 
-        let (px, py) = self.mapper.map(layout, &pen);
-        let curved = (pen.pressure as f32 / layout.max_pressure as f32).powf(self.pressure_gamma);
+        let (px, py) = map_to_screen(layout, &pen);
+        let curved = (pen.pressure as f32 / layout.max_pressure as f32).powf(self.gamma);
         let info = POINTER_TYPE_INFO {
             r#type: PT_PEN,
             Anonymous: POINTER_TYPE_INFO_0 {

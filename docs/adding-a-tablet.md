@@ -8,8 +8,8 @@ A tablet is one entry in `src/tablet.rs`: USB ids, where each value sits in the 
 |---|---|
 | `src/tablet.rs` | Tablet profiles and report decoding. This is the file to edit for a new tablet. |
 | `src/output.rs` | Turns decoded pen state into a Windows Ink pen or a mouse. Tablet independent. |
-| `src/config.rs` | `buttons.yaml`. Tablet independent. |
-| `src/main.rs` | Finds a known tablet, reads it, routes reports. |
+| `src/config.rs` | `buttons.yaml`. Tablet independent, up to 8 tablet buttons (one bit each in a byte). |
+| `src/main.rs` | Finds a known tablet, reads it, routes reports. Also the `print` and `buttons` debug modes. |
 | `src/probe.rs` | The `probe` mode. |
 | `src/tray.rs` | Tray icon. |
 
