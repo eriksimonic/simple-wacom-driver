@@ -12,6 +12,7 @@ use windows::Win32::UI::Controls::{
     CreateSyntheticPointerDevice, HSYNTHETICPOINTERDEVICE, POINTER_FEEDBACK_NONE,
     POINTER_TYPE_INFO, POINTER_TYPE_INFO_0,
 };
+use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows::Win32::UI::Input::Pointer::{
     InjectSyntheticPointerInput, POINTER_FLAGS, POINTER_FLAG_DOWN, POINTER_FLAG_FIRSTBUTTON, POINTER_FLAG_INCONTACT,
     POINTER_FLAG_INRANGE, POINTER_FLAG_NEW, POINTER_FLAG_SECONDBUTTON, POINTER_FLAG_UPDATE, POINTER_FLAG_UP,
@@ -28,7 +29,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VIRTUAL_KEY, VK_CONTROL, VK_MENU, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, SetProcessDPIAware, PEN_FLAG_BARREL, PEN_FLAG_ERASER, PEN_FLAG_INVERTED, PEN_MASK_PRESSURE, PT_PEN, SM_CXSCREEN, SM_CYSCREEN,
+    GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, PEN_FLAG_BARREL, PEN_FLAG_ERASER, PEN_FLAG_INVERTED, PEN_MASK_PRESSURE, PT_PEN, SM_CXSCREEN, SM_CYSCREEN,
 };
 
 const PEN_REPORT: u8 = 0x10;
@@ -195,29 +196,31 @@ fn foreground_exe() -> (isize, Option<String>) {
 }
 
 /// Maps tablet coordinates onto the primary screen, using the part of the tablet that has the screen's aspect ratio.
-struct Mapper {
-    screen: (i32, i32),
-    /// x offset, y offset, width, height in tablet units
-    area: (i32, i32, i32, i32),
-}
+/// The screen size is read on every call, so resolution and display scale changes apply without a restart.
+struct Mapper;
 
 impl Mapper {
     fn new() -> Self {
-        // without this, GetSystemMetrics returns the screen size divided by the display scale
-        let _ = unsafe { SetProcessDPIAware() };
-        let screen = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+        // per-monitor aware, so GetSystemMetrics always returns real pixels, also after a scale change
+        let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        Mapper
+    }
+
+    fn screen(&self) -> (i32, i32) {
+        unsafe { (GetSystemMetrics(SM_CXSCREEN).max(2), GetSystemMetrics(SM_CYSCREEN).max(2)) }
+    }
+
+    fn map(&self, x: i32, y: i32) -> (i32, i32) {
+        let screen = self.screen();
         let (width, height) = if MAX_X * screen.1 <= MAX_Y * screen.0 {
             (MAX_X, MAX_X * screen.1 / screen.0)
         } else {
             (MAX_Y * screen.0 / screen.1, MAX_Y)
         };
-        Mapper { screen, area: ((MAX_X - width) / 2, (MAX_Y - height) / 2, width, height) }
-    }
-
-    fn map(&self, x: i32, y: i32) -> (i32, i32) {
+        let (left, top) = ((MAX_X - width) / 2, (MAX_Y - height) / 2);
         (
-            ((x - self.area.0) * self.screen.0 / self.area.2).clamp(0, self.screen.0 - 1),
-            ((y - self.area.1) * self.screen.1 / self.area.3).clamp(0, self.screen.1 - 1),
+            ((x - left) * screen.0 / width).clamp(0, screen.0 - 1),
+            ((y - top) * screen.1 / height).clamp(0, screen.1 - 1),
         )
     }
 }
@@ -251,7 +254,7 @@ impl MouseInjector {
         let x = u16::from_le_bytes([r[2], r[3]]) as i32;
         let y = u16::from_le_bytes([r[5], r[6]]) as i32;
         let (px, py) = self.mapper.map(x, y);
-        let (width, height) = self.mapper.screen;
+        let (width, height) = self.mapper.screen();
         let mouse = |dx: i32, dy: i32, flags| INPUT {
             r#type: INPUT_MOUSE,
             Anonymous: INPUT_0 { mi: MOUSEINPUT { dx, dy, dwFlags: flags, ..Default::default() } },
