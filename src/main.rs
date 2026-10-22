@@ -1,43 +1,60 @@
-use hidapi::HidApi;
+use rusb::{Direction, TransferType};
+use std::time::Duration;
 
 const WACOM_VID: u16 = 0x056A;
+const CTL6100WL_PID: u16 = 0x0378;
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+const PEN_REPORT: u8 = 0x10;
+const MAX_PRESSURE: u16 = 4095;
+
+fn print_pen(r: &[u8]) {
+    let in_range = r[1] & 0x20 != 0;
+    let tip = r[1] & 0x01 != 0;
+    let x = u16::from_le_bytes([r[2], r[3]]);
+    let y = u16::from_le_bytes([r[5], r[6]]);
+    let pressure = u16::from_le_bytes([r[8], r[9]]);
+    let bar = "#".repeat((pressure as usize * 40) / MAX_PRESSURE as usize);
+    println!("range={} tip={} x={x:5} y={y:5} pressure={pressure:4} {bar}", in_range as u8, tip as u8);
 }
 
 fn main() {
-    let api = HidApi::new().expect("hidapi init");
-    let devices: Vec<_> = api.device_list().filter(|d| d.vendor_id() == WACOM_VID).collect();
+    let handle = rusb::open_device_with_vid_pid(WACOM_VID, CTL6100WL_PID)
+        .expect("tablet not found or not bound to WinUSB");
+    let config = handle.device().active_config_descriptor().expect("config descriptor");
 
-    let arg = std::env::args().nth(1);
-    let Some(arg) = arg else {
-        for (i, d) in devices.iter().enumerate() {
-            println!(
-                "[{i}] pid={:04x} usage_page={:04x} usage={:04x} path={}",
-                d.product_id(),
-                d.usage_page(),
-                d.usage(),
-                d.path().to_string_lossy()
-            );
+    let mut target = None;
+    for iface in config.interfaces() {
+        for desc in iface.descriptors() {
+            for ep in desc.endpoint_descriptors() {
+                println!(
+                    "interface {} endpoint {:02x} {:?} {:?} max_packet={}",
+                    desc.interface_number(),
+                    ep.address(),
+                    ep.direction(),
+                    ep.transfer_type(),
+                    ep.max_packet_size()
+                );
+                if ep.direction() == Direction::In
+                    && ep.transfer_type() == TransferType::Interrupt
+                    && target.is_none()
+                {
+                    target = Some((desc.interface_number(), ep.address(), ep.max_packet_size()));
+                }
+            }
         }
-        println!("usage: wacom <index>   dump descriptor and print raw reports");
-        return;
-    };
-
-    let d = devices[arg.parse::<usize>().expect("index")];
-    let dev = d.open_device(&api).expect("open failed (another process holds it exclusively?)");
-
-    let mut desc = [0u8; 4096];
-    match dev.get_report_descriptor(&mut desc) {
-        Ok(n) => println!("descriptor ({n} bytes):\n{}", hex(&desc[..n])),
-        Err(e) => println!("descriptor unavailable: {e}"),
     }
 
-    println!("reading, move the pen (ctrl+c to stop)");
-    let mut buf = [0u8; 256];
+    let (interface, endpoint, size) = target.expect("no interrupt IN endpoint");
+    handle.claim_interface(interface).expect("claim interface");
+    println!("reading endpoint {endpoint:02x}, move the pen (ctrl+c to stop)");
+
+    let mut buf = vec![0u8; size as usize];
     loop {
-        let n = dev.read(&mut buf).expect("read");
-        println!("{}", hex(&buf[..n]));
+        match handle.read_interrupt(endpoint, &mut buf, Duration::from_millis(500)) {
+            Ok(n) if n >= 10 && buf[0] == PEN_REPORT => print_pen(&buf[..n]),
+            Ok(_) => {}
+            Err(rusb::Error::Timeout) => {}
+            Err(e) => panic!("read: {e}"),
+        }
     }
 }
