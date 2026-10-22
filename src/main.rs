@@ -295,9 +295,13 @@ impl Injector {
         }
         let (hwnd, exe) = foreground_exe();
         self.foreground = hwnd;
-        let override_gamma = exe.as_ref().and_then(|exe| self.app_gamma.iter().find(|(name, _)| name == exe));
+        // popups and system windows can't be read, so keep the gamma of the app they belong to
+        let Some(exe) = exe else {
+            return;
+        };
+        let override_gamma = self.app_gamma.iter().find(|(name, _)| *name == exe);
         self.pressure_gamma = override_gamma.map_or(self.default_gamma, |(_, gamma)| *gamma);
-        println!("foreground {}, pressure_gamma {}", exe.as_deref().unwrap_or("unknown"), self.pressure_gamma);
+        println!("foreground {exe}, pressure_gamma {}", self.pressure_gamma);
     }
 
     fn send(&mut self, r: &[u8]) {
