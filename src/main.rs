@@ -73,7 +73,7 @@ fn parse_key(name: &str) -> Option<VIRTUAL_KEY> {
 }
 
 fn parse_action(value: &str) -> Option<Action> {
-    match value.trim().trim_matches(|c| c == '"' || c == ''').to_ascii_lowercase().as_str() {
+    match value.trim().trim_matches(|c| c == '"' || c == '\'').to_ascii_lowercase().as_str() {
         "none" => Some(Action::None),
         "barrel" => Some(Action::Barrel),
         "eraser" => Some(Action::Eraser),
